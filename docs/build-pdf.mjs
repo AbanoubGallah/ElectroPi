@@ -17,9 +17,7 @@ const HTML = join(ROOT, 'docs', 'ANSWERS.html');
 const PDF = join(ROOT, 'docs', 'Abanoub-Gallah-QA-Assessment-ElectroPi.pdf');
 
 const FOOTER = `
-<div style="width:100%;font:8pt -apple-system,Helvetica,sans-serif;color:#8b98a8;
-            padding:0 16mm;display:flex;justify-content:space-between;">
-  <span>Abanoub Gallah &middot; Senior QA Engineer Assessment &middot; Electro Pi</span>
+<div style="width:100%;font:9pt Georgia,serif;color:#555;text-align:center;">
   <span class="pageNumber"></span>
 </div>`;
 

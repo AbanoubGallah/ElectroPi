@@ -1,194 +1,128 @@
 ---
 title: Senior QA Engineer Technical Assessment
-subtitle: Electro Pi - Multi-tenant Cloud POS & Inventory Platform
+subtitle: Electro Pi POS & Inventory Platform
 author: Abanoub Gallah
 date: 1 September 2026
 repo: https://github.com/AbanoubGallah/ElectroPi
 ---
 
-# Summary
+I built the framework instead of just describing it. The code is at
+github.com/AbanoubGallah/ElectroPi and runs on a clean clone with
+`npm ci && npx playwright test`. It includes a small mock POS app, so there is
+no environment to set up first. 17 tests pass (8 API, 9 UI) and the Postman
+collection runs under Newman with 38 assertions.
 
-Everything in this document is backed by working code in the accompanying
-repository — `https://github.com/AbanoubGallah/ElectroPi`. Rather than describing a
-framework, I built it: a Playwright + TypeScript suite with a mock POS
-application bundled in, so a reviewer can clone the repo and run
-`npm ci && npx playwright test` with no environment to provision.
+The brief left a few things open, mainly the validation status codes and the
+database schema. I have listed what I assumed at the end.
 
-The suite as submitted: **17 automated tests (8 API, 9 UI), all passing**, plus a
-**Postman collection of 9 requests and 38 assertions** verified under Newman.
+# Part 1: UI test automation and architecture
 
-I also verified the tests are meaningful rather than merely green — see
-§ Evidence at the end. In short: I broke the application in two ways
-(changed the success-toast wording; made the API return `201` while persisting
-nothing) and confirmed the relevant tests failed. I re-ran the suite with
-network latency raised 6× and it passed unchanged, which is the practical proof
-that no hardcoded waits are hiding in it.
+## 1. Framework choice
 
----
+I would use Playwright with TypeScript.
 
-# Part 1: UI Test Automation & Architecture
+The main reason is that it covers the UI and the API in one tool. Most of the
+instability in UI suites comes from setup, not from the UI itself, and
+being able to log in and create inventory over the REST API inside the same test
+file removes a lot of it. The same request context then covers the Part 2 API
+tests, so we get one framework, one CI setup and one report instead of two of
+each.
 
-## 1.1 Framework choice
+The second reason is multi-tenancy. A browser context in Playwright is a cheap,
+isolated browser profile, so one test can hold two signed-in merchants at the
+same time and check that neither can see the other's data. On a platform like
+this that is the failure I would least like to ship.
 
-**I would choose Playwright** (with TypeScript).
+Third, debugging. With `trace: 'on-first-retry'` a failed CI run produces a
+trace with DOM snapshots, network calls and console output, which you replay
+locally with `npx playwright show-trace`. In practice this saves more time than
+any difference in syntax between the three tools.
 
-The choice follows from four properties of *this* product rather than from
-general preference. Electro Pi is (a) multi-tenant, (b) REST-API-driven with
-dynamic UI components, (c) cloud-based, and (d) commercially sensitive to
-accuracy and stability. Scored against those:
-
-| Criterion (weighted to this product) | Playwright | Cypress | Selenium |
+|  | Playwright | Cypress | Selenium |
 |---|---|---|---|
-| Auto-waiting / flake resistance out of the box | Strong — web-first assertions retry until timeout | Strong — retry-ability built in | Weak — explicit `WebDriverWait` everywhere, by hand |
-| Native API testing in the same framework | Yes — `APIRequestContext`, first-class | Via `cy.request`, adequate | No — needs RestAssured/requests alongside |
-| WebKit/Safari coverage (merchants run POS on iPads) | Yes — bundled WebKit | Experimental, incomplete | Yes, but needs SafariDriver + real macOS |
-| True multi-tenant session testing (two merchants, one test) | Yes — multiple isolated `BrowserContext`s in one test | Hard — one browser, one origin at a time | Possible, but a second WebDriver session is slow and heavy |
-| Parallel execution and CI sharding | Built in and free (`--shard`) | Parallelisation is a paid Cloud feature | Needs Grid infrastructure to maintain |
-| Debuggability of a CI failure | Trace Viewer: DOM snapshots, network, console, replay | Good — video + time-travel in Cypress Cloud | Weak — a screenshot and a stack trace |
-| Speed (typical suite wall-clock) | Fast — out-of-process, real parallel workers | Moderate | Slowest — HTTP-hop per command |
-| Team adoption cost | Low — same TS the app team writes | Low | Moderate |
+| Waiting for elements | Automatic | Automatic | Manual `WebDriverWait` |
+| API testing in the same tool | Yes | `cy.request` | No |
+| WebKit / Safari (iPad terminals) | Bundled | Experimental | Needs macOS + SafariDriver |
+| Parallel runs and sharding | Included | Paid feature | Needs a Grid |
+| Debugging a CI failure | Trace viewer | Video, time travel | Screenshot and stack trace |
 
-**The three arguments that actually decide it:**
+I would still pick Selenium if we needed a large real-device farm or if the team
+wrote tests in several languages, and Cypress if the team already used it and
+Safari coverage did not matter. Neither applies here.
 
-1. **API-first setup makes UI tests stable *and* fast.** Most UI flakiness is
-   not the UI — it is unreliable preconditions. Playwright lets a test
-   authenticate and seed inventory over the REST API in the same file, with the
-   same tooling, then exercise only the UI behaviour under test. In this repo
-   that is the `inventoryAsAdmin` fixture: it obtains a token over HTTP, injects
-   the session, and lands on the Inventory page — no UI login, no repeated
-   3-second cost per test. The same `APIRequestContext` then covers Part 2
-   entirely, so API and UI coverage share one framework, one CI configuration,
-   and one report.
+## 2. Framework structure
 
-2. **Multi-tenancy needs real browser isolation.** The most expensive possible
-   bug on this platform is one merchant seeing another's data. Playwright's
-   `BrowserContext` is a cheap, fully isolated browser profile, so a single test
-   can hold two authenticated merchants side by side and assert isolation
-   directly. Cypress's in-browser architecture makes that awkward; Selenium can
-   do it, but at the cost of a second full WebDriver session.
-
-3. **Debuggability is a first-class requirement, and traces answer it.** The
-   assessment asks for easy debugging. `trace: 'on-first-retry'` records a
-   complete timeline — every DOM snapshot, network call and console message — so
-   a CI failure is replayed locally with `npx playwright show-trace` instead of
-   being reproduced by guesswork. That single feature is worth more to a QA
-   team's throughput than any syntax preference.
-
-**Where I would not choose Playwright — stated plainly, because a framework
-recommendation without limits is not a recommendation:**
-
-- **Selenium** if we needed a real-device cloud at scale (BrowserStack/Sauce
-  against dozens of legacy browser/OS combinations), if the team were polyglot
-  (Java/C#/Python engineers contributing to one suite), or if a corporate
-  standard already mandated WebDriver. Selenium's ecosystem breadth and W3C
-  standardisation are genuine advantages there.
-- **Cypress** if the priority were maximum developer-experience for
-  component-level and in-app testing, the team were already deep in it, and
-  Safari coverage did not matter. Its interactive runner is still the best
-  authoring loop available.
-
-Neither exception applies here, so: Playwright.
-
-## 1.2 Design pattern
-
-**Page Object Model, extended with Component Objects and Playwright Fixtures —
-arranged as six layers.** A plain POM handles reusability but tends to grow
-god-objects and duplicated setup; adding component objects and fixtures fixes
-both without the onboarding cost of full Screenplay.
+Page Object Model, with component objects for shared UI and Playwright fixtures
+for setup and teardown.
 
 ```
 src/
-  config/env.ts            Layer 0  environment + credentials (single source of truth)
-  api/                     Layer 1  service clients (AuthApi, InventoryApi)
-  pages/                   Layer 2  page objects (BasePage, LoginPage, InventoryPage)
-    components/                     component objects (ToastComponent, SideNavComponent)
-  fixtures/                Layer 3  dependency injection + guaranteed teardown
-  data/                    Layer 4  test-data factories (unique by construction)
+  config/env.ts       environment, credentials, timeouts
+  api/                AuthApi, InventoryApi and their response types
+  pages/              BasePage, LoginPage, InventoryPage
+    components/       ToastComponent, SideNavComponent
+  fixtures/           test fixtures: setup, auth, cleanup
+  data/               test data factories
 tests/
-  api/  ui/                Layer 5  specs - business intent only
+  api/                API suite
+  ui/                 UI suite
 ```
 
-**Layer 0 — Configuration.** Nothing outside `env.ts` reads `process.env`. One
-file resolves environment, base URLs, tenant, users and named timeouts, and it
-throws a readable error on a missing variable instead of failing later as an
-`undefined` selector. The same suite runs against local, staging and pre-prod by
-changing environment variables only.
+`config/env.ts` is the only file that reads `process.env`. It resolves URLs,
+users and timeouts, and throws a clear error if something is missing. The same
+suite runs against local, staging or pre-prod by changing environment variables.
 
-**Layer 1 — API service clients.** Thin, typed wrappers over the REST endpoints.
-They return the raw response so tests can assert on status codes and error
-bodies — a client that throws on non-2xx cannot test negative cases. They serve
-double duty: the subject of the API tests, and the fast path for seeding UI test
-preconditions.
+`api/` holds thin wrappers over the endpoints. They return the raw response
+rather than throwing on a non-2xx, otherwise negative tests could not use them.
+They are also how UI tests set up their data.
 
-**Layer 2 — Page and Component Objects.** Three rules keep this layer honest:
+In `pages/` I keep to three habits. Locators are created in the constructor and
+never resolved until they are used, so a React re-render cannot invalidate
+them. Assertions about behaviour stay in the tests, so the same
+page object works for a happy path and a validation case without growing
+if-statements; the only exception is `waitUntilReady()`, which is a wait rather
+than a check. Anything in the app shell, such as the toast host and the sidebar,
+becomes a component object so it exists in one place.
 
-- *Locators are declared, never resolved.* A Playwright `Locator` is a lazy
-  query re-evaluated on each use, so nothing holds a stale element handle across
-  a React re-render.
-- *No business assertions inside page objects.* Page objects expose behaviour
-  and state; tests own the expectations. This is what lets one page object serve
-  a happy path and a validation test without accumulating conditionals. The
-  single exception is `waitUntilReady()`, which is readiness, not an assertion.
-- *Shared UI becomes a component object.* The toast host and the sidebar belong
-  to the app shell, so they are components injected into `BasePage` rather than
-  duplicated per page. When the nav is restyled, exactly one file changes.
-
-**Layer 3 — Fixtures (the layer most POM implementations are missing).** A test
-declares what it needs and Playwright constructs it:
+`fixtures/` is the part a plain POM usually lacks. A test asks for what it needs:
 
 ```ts
 test('...', async ({ inventoryAsAdmin, adminToken, cleanup }) => { ... });
 ```
 
-This buys three things that `beforeEach` chains cannot:
+The `cleanup` fixture deletes anything the test created even if the test failed,
+because fixtures always unwind. `adminToken` is worker-scoped, so the suite logs
+in once per worker instead of once per test. Combinations of setup are declared
+instead of inherited from a chain of base classes.
 
-- **Guaranteed teardown.** The `cleanup` fixture deletes every item a test
-  created *even when the test fails*, because a fixture always unwinds. A red
-  run therefore never poisons the next one.
-- **Cheap authentication.** `adminToken` is worker-scoped: the suite logs in
-  once per worker process, not once per test.
-- **Composability without inheritance.** Setup combinations are assembled by
-  declaration rather than by a deepening hierarchy of base classes.
+`data/` builds payloads: `anItem({ price: -5 })` gives a valid item with one
+field changed, which keeps negative tests to a line each. SKUs are generated per
+call, so parallel workers never collide and a re-run does not hit a duplicate.
 
-**Layer 4 — Data factories.** `anItem({ price: -5 })` returns a valid payload
-with one field overridden, so negative tests stay one line each. Identifiers are
-unique by construction (`MS-<random>`), which is what makes the suite safe to
-run in parallel and re-runnable without tripping duplicate-SKU conflicts.
+On the four qualities in the question:
 
-**Layer 5 — Specs** read as business intent. The Part 1.3 flow below contains no
-selector, no URL and no timeout.
+- Scalability comes from the layering plus tags (`@smoke`, `@regression`,
+  `@api`, `@security`) that decide what runs at each pipeline stage. A new module
+  means one page object and one spec.
+- Reuse comes from component objects, the API clients and the data factories.
+- Maintainability mostly comes from selectors living in one place per page, and
+  from typed responses, so a renamed API field fails the type check instead of an
+  assertion somewhere.
+- Debugging comes from traces on retry, `test.step` names that match the test
+  case, and screenshots and video on failure.
 
-**Why not Screenplay?** Screenplay (Actors, Tasks, Questions, Abilities) is the
-better model for suites with many user roles composing many reusable tasks, and
-I would revisit it if Electro Pi grew to a dozen roles. Today its cost is
-concrete — a second vocabulary the app developers do not know, more indirection
-per test, slower onboarding — and Playwright fixtures already deliver the
-composability that usually motivates the move. I would rather have developers
-contributing to a POM they can read than a purer architecture they avoid.
+I considered the Screenplay pattern. It suits suites with many roles composing
+many reusable tasks, and I would look at it again if this grew to a dozen roles.
+Right now it would add a vocabulary the application developers do not use, and
+Playwright fixtures already give most of the composability people move to
+Screenplay for.
 
-**How this structure produces the four required qualities:**
+## 3. Implementation
 
-| Requirement | Mechanism |
-|---|---|
-| Scalability | Layer separation + tag-based execution (`@smoke`, `@regression`, `@api`, `@security`) + CI sharding; adding a module means adding one page object and one spec |
-| Reusability | Component objects for shared UI, service clients for setup, factories for data |
-| Maintainability | A selector changes in exactly one place; typed contracts mean a backend rename breaks compilation, not a random assertion |
-| Debuggability | Trace-on-retry, `test.step` narration matching the test case, a logger that annotates the HTML report, screenshots + video on failure |
-
-## 1.3 Implementation
-
-The requested flow, from
-`tests/ui/inventory-create-product.spec.ts`. Each of the five steps is a
-`test.step`, so the HTML report reads like the test case it came from.
+From `tests/ui/inventory-create-product.spec.ts`:
 
 ```ts
-import { test, expect } from '../../src/fixtures/test-fixtures.js';
-import { env } from '../../src/config/env.js';
-import { aProductForm } from '../../src/data/products.js';
-import type { InventoryItem } from '../../src/api/types.js';
-
 test.describe('Inventory - create product', () => {
-  /* This spec's subject IS the login screen, so it must not inherit a session. */
   test.use({ storageState: { cookies: [], origins: [] } });
 
   test('Store Admin can create a product and sees a success toast @smoke @regression',
@@ -202,7 +136,6 @@ test.describe('Inventory - create product', () => {
 
       await test.step("Navigate to the 'Inventory' module", async () => {
         await inventoryPage.nav.goToInventory();
-        // Readiness gate: spinner gone + "Add product" enabled (both fetches done).
         await inventoryPage.waitUntilReady();
       });
 
@@ -219,18 +152,14 @@ test.describe('Inventory - create product', () => {
         await inventoryPage.toast.expectSuccess(/saved successfully/i);
       });
 
-      /* Beyond the brief, but this is what makes the test trustworthy: the toast
-         is a UI promise; the 201 and the grid row are the evidence it was kept. */
-      await test.step('Verify the API accepted it and the grid reflects it', async () => {
+      await test.step('Check it really was saved', async () => {
         expect(response.status()).toBe(201);
         const created = (await response.json()) as InventoryItem;
         cleanup.push(created.id);
-
         expect(created).toMatchObject({
           item_name: product.name,
           price: Number(product.price),
-          tenant_id: env.tenantId,
-          category_name: env.electronicsCategory.name,
+          category_name: 'Electronics',
         });
         await expect(inventoryPage.rowByName(product.name)).toBeVisible();
       });
@@ -238,290 +167,166 @@ test.describe('Inventory - create product', () => {
 });
 ```
 
-**One deliberate addition to the brief.** The five requested steps end at the
-toast. I assert the `201` and the grid row as well, because a success toast is
-only a *claim*. I demonstrated the difference: with the API changed to return
-`201` and persist nothing, a toast-only test still passes, while this test fails
-(see § Evidence).
+Each of the five requested steps is a `test.step`, so the HTML report reads like
+the test case it came from.
 
-Supporting page-object code — the parts that carry the stability design:
+I added a sixth step that checks the 201 and the grid row. A success toast only
+tells you the UI thinks it worked. While building this I changed the API to
+return 201 without saving anything, and a check that stopped at the toast still
+passed, while this one failed.
+
+The two page-object methods doing the waiting:
 
 ```ts
-// src/pages/InventoryPage.ts
-
-/**
- * Readiness for an async-rendered grid, expressed as three observable facts:
- *   spinner gone -> data arrived -> the primary action is enabled.
- *
- * The third condition is the one that matters. The app enables "Add product"
- * only after BOTH /inventory/items and /categories resolve, so waiting on it
- * removes the entire class of "clicked too early" failures - with no sleep,
- * and without coupling the test to a request count.
- */
-override async waitUntilReady(): Promise<void> {
+// InventoryPage: the page is ready when the spinner has gone and the button
+// the data unlocks is enabled. The app enables it only after both
+// /inventory/items and /categories have come back.
+async waitUntilReady(): Promise<void> {
   await expect(this.loadingSpinner).toBeHidden({ timeout: env.timeouts.action });
   await expect(this.addProductButton).toBeEnabled({ timeout: env.timeouts.action });
 }
 
-/**
- * Clicks Save and waits for the request to settle.
- *
- * `waitForResponse` is registered *before* the click so the listener cannot
- * miss a fast response - a subtle ordering bug that shows up as a 1-in-20 flake.
- */
+// The response listener is set up before the click, so a fast response
+// cannot be missed.
 async save(): Promise<Response> {
   const responsePromise = this.page.waitForResponse(
-    (response) =>
-      response.url().includes('/api/v1/inventory/items') &&
-      response.request().method() === 'POST',
+    (r) => r.url().includes('/api/v1/inventory/items') && r.request().method() === 'POST',
     { timeout: env.timeouts.action },
   );
   await this.saveButton.click();
-  const response = await responsePromise;
-  return response;
+  return responsePromise;
 }
 ```
 
-```ts
-// src/pages/components/ToastComponent.ts
-//
-// This toast auto-dismisses after 4 seconds. The helper waits for visibility
-// and reads the text in the SAME web-first assertion - never `waitFor()` then
-// `innerText()`, which is the classic race that makes toast assertions flaky.
+The repository also covers a missing price, a negative price, a duplicate SKU,
+reaching `/inventory` while signed out, and the toast clearing itself.
 
-async expectSuccess(text?: string | RegExp): Promise<void> {
-  await expect(this.success, 'a success toast should be shown')
-    .toBeVisible({ timeout: env.timeouts.toast });
-  if (text !== undefined) {
-    await expect(this.success).toContainText(text, { timeout: env.timeouts.toast });
-  }
-}
-```
+## 4. Dynamic elements and flaky tests
 
-The repository also contains the negative UI coverage this flow needs to be
-real: missing price (inline error, modal stays open with input intact, no row
-added), negative price, duplicate SKU, unauthenticated access to `/inventory`,
-tenant-badge verification, and a reload test proving persistence.
+A fixed sleep is wrong either way: too short and the test is flaky, too long and
+the suite is slow. So every wait is a wait for something observable.
 
-## 1.4 Stability — dynamic elements and flake prevention, without sleeps
+Playwright's assertions (`toBeVisible`, `toBeEnabled`, `toHaveText`) poll until
+they pass or time out, and its actions wait for an element to be visible, stable
+and enabled before acting. That covers most dynamic rendering. What it does not
+decide is what "ready" means for a given page, so I define that per page:
 
-A hardcoded sleep is always wrong in both directions: too short and the test is
-flaky, too long and the suite is slow. Every wait should instead be a wait *for
-an observable condition*. My approach has five parts.
+- Spinners: wait for `toBeHidden()`, not for a duration.
+- Data arriving: wait for what the data enables. On the inventory page the "Add
+  product" button is enabled only after both requests return, so waiting on that
+  one condition covers both.
+- Fields filled asynchronously: the category select stays disabled until its
+  options load, so `toBeEnabled()` is the gate before selecting.
+- A specific request: `waitForResponse`, set up before the click.
 
-### 1. Wait on conditions, and prefer semantic readiness over technical readiness
+I avoid `networkidle`. A POS dashboard polls, so "no requests for 500ms" may
+never be true.
 
-Playwright's web-first assertions (`expect(locator).toBeVisible()`,
-`.toBeEnabled()`, `.toHaveText()`) poll until the condition holds or the timeout
-expires, and its actions auto-wait for an element to be attached, visible,
-stable, enabled and unobstructed before acting. That handles most dynamic
-rendering for free.
+For selectors I use `data-testid` first, then role or label, then CSS structure,
+and never XPath or generated class names like `.css-1x3fh9`. Adding a testid to
+new components is cheap for developers and it is the single change that removes
+most UI flakiness, so I would ask for it as part of a component's definition of
+done. Rows are found by SKU or name rather than by index, since with parallel
+workers "the first row" is not stable.
 
-The part that is not free is deciding *what* "ready" means. I define readiness
-per page, in terms of what the user can actually do:
+Isolation matters as much as waiting, and gets misread as a timing problem more
+often than anything else. Each test gets a fresh browser context, creates its own
+data with a unique SKU, and cleans up in a fixture instead of at the end of the
+test body, so cleanup still runs after a failure. No test depends on another
+running first.
 
-- **Loading spinners:** `await expect(spinner).toBeHidden()` — assert the
-  spinner's absence, never a duration.
-- **Async data render:** wait for the *consequence* of the data arriving. On the
-  Inventory page, "Add product" is enabled only after both `GET /inventory/items`
-  and `GET /categories` resolve, so `toBeEnabled()` on that button is a single
-  condition that subsumes both requests.
-- **Async-populated inputs:** the category `<select>` is disabled until its
-  options land, so `toBeEnabled()` is the gate before `selectOption`.
-- **Network delays:** await the specific response —
-  `page.waitForResponse(...)` registered *before* the click, so a fast response
-  cannot be missed.
-- **I do not use `networkidle`.** A POS dashboard polls; "no requests for 500ms"
-  may never be true. Playwright discourages it, and it is a technical proxy for a
-  question the UI can answer directly.
+Where the app is not deterministic I make it so: `page.route` to stub
+third-party calls or force a 500 from the inventory service, and `page.clock`
+for anything time-dependent such as an end-of-day cutoff. CI pins the browser
+version through Playwright, and the viewport, timezone and locale, so a currency
+or date assertion cannot fail because of where a runner is.
 
-### 2. Selectors that survive a component refactor
+Retries are on in CI only, set to 1. Locally there are none, so flakiness shows
+up while it is cheap to fix. A test that passes on retry is reported as flaky,
+and that report is the list I work from. A nightly job runs the suite with
+`--repeat-each=5 --retries=0` to find the failure that happens once in twenty. If
+a test stays flaky it gets tagged `@quarantine`, taken out of the blocking gate,
+and given a ticket with an owner and a date.
 
-Priority order, enforced in review:
+Some cases I have hit before and what they usually turn out to be:
 
-1. `data-testid` — an explicit contract with the front-end team. I would agree it
-   as a definition-of-done item for new components; it is cheap for developers
-   and removes the single largest source of UI flake.
-2. Role and label (`getByRole`, `getByLabel`) — user-visible semantics, which
-   also surface accessibility defects.
-3. CSS structure — last resort.
-
-Never XPath, never generated class names (`.css-1x3fh9`), and never index-based
-lookups. Rows are located by business key: `rowBySku('MS-001')`, not
-`.nth(0)` — with parallel workers writing to the same tenant, "the first row" is
-not a stable concept.
-
-### 3. Test isolation — the flake cause that gets misdiagnosed as timing
-
-| Practice | Why |
-|---|---|
-| One fresh `BrowserContext` per test | No cookie/storage bleed between tests |
-| Unique data per test (`MS-<random>`) | Two parallel workers can never collide on a SKU |
-| Teardown in a fixture, not at the end of the test body | Cleanup still runs when an assertion fails |
-| No shared mutable state, no ordering dependencies | Any test can run alone, in any order, in any shard |
-| Preconditions seeded over the API | Removes the slowest, least relevant UI steps from setup |
-
-### 4. Determinism where the app is not deterministic
-
-- **Route interception** (`page.route`) to stub third-party calls and to force
-  error states — a 500 from the inventory service, or a timeout — which are
-  otherwise nearly impossible to reproduce on demand.
-- **Clock control** (`page.clock`) for anything time-dependent, such as an
-  end-of-day sales cutoff, instead of waiting for wall-clock time.
-- **Pinned environment:** browsers come from the pinned Playwright version, and
-  CI runs a fixed viewport, timezone and locale, so a currency or date assertion
-  cannot fail because a runner is in a different region.
-
-### 5. Treating flakiness as a defect with an owner
-
-- `retries: 1` **in CI only**. Locally there are no retries, so flakiness
-  surfaces while it is cheap to fix. A test that passes on retry is reported as
-  *flaky*, not green — that report is the triage queue.
-- A **nightly flake hunt** runs the suite `--repeat-each=5 --retries=0`. This is
-  the only reliable way to find a 1-in-20 failure before a developer loses an
-  hour to it.
-- **Quarantine with an expiry.** A persistently flaky test is tagged
-  `@quarantine`, excluded from the blocking gate, and given a ticket with an
-  owner and a due date. Quarantine is a holding pattern, not a graveyard.
-- **Trace on first retry** so root-causing does not require reproduction.
-
-### Symptom → cause → fix
-
-| Symptom | Actual cause | Fix |
+| Symptom | Usual cause | Fix |
 |---|---|---|
-| "Element not found" that passes locally | Assertion ran before async render | Semantic readiness gate (`toBeEnabled` on the action the data unlocks) |
-| Click lands on the wrong element | Layout shifted as data arrived | Playwright's actionability checks + wait for the settled state |
-| Toast assertion fails intermittently | Toast auto-dismissed between `waitFor` and `innerText` | Single web-first assertion covering visibility and text |
-| Passes alone, fails in the suite | Shared data or leaked session state | Unique data per test + fresh context + fixture teardown |
-| Fails only on the CI runner | Slower machine, different viewport/timezone | Condition-based waits, pinned viewport/TZ/locale, environment-driven timeouts |
-| Fails only in a specific shard | Hidden ordering dependency | Remove shared state; every test creates its own preconditions |
+| Passes locally, "element not found" in CI | Assertion ran before the data rendered | Wait on what the data enables |
+| Click hits the wrong element | Layout moved as data arrived | Playwright's actionability checks |
+| Toast assertion fails now and then | Toast auto-dismissed between the wait and reading the text | One assertion that waits and checks the text together |
+| Passes alone, fails in the suite | Shared data or leftover session | Unique data per test, fresh context, cleanup in a fixture |
+| Fails only in one shard | Hidden dependency on another test | Remove shared state |
 
-**Evidence this works rather than merely reads well:** I re-ran the smoke suite
-with the application's artificial network latency raised from 350 ms to 2000 ms
-(≈6×) with no code change. Both tests passed. A suite with hidden timing
-assumptions cannot do that.
+To check there was nothing timing-dependent left, I raised the mock app's
+artificial latency from 350ms to 2000ms and ran the smoke tests again without
+changing any code. They passed.
 
----
+# Part 2: API testing strategy
 
-# Part 2: API Testing Strategy
+`POST /api/v1/inventory/items`, with `Authorization: Bearer <token>` and the
+payload from the brief.
 
-`POST /api/v1/inventory/items` — `Authorization: Bearer <token>`
+## 1. Test scenarios
 
-```json
-{ "item_name": "Wireless Mouse", "sku": "MS-001", "quantity": 50,
-  "price": 25.00, "category_id": 3 }
-```
+These are implemented in `tests/api/inventory-items.spec.ts`. Each one checks
+the status code, the response body, and then reads the item back, because a test
+that only checks the status code will pass against an endpoint that returns 201
+and saves nothing.
 
-## 2.1 Test scenarios
+**Positive 1: valid payload, Store Admin token.** The payload from the brief with
+a valid token and an existing `category_id: 3`. Expect **201**. The body echoes
+the fields sent, adds an `id`, `created_at` and `category_name: "Electronics"`,
+and there is a `Location` header. A following `GET` on that id returns 200 with
+the same values.
 
-Every scenario below is implemented in
-`tests/api/inventory-items.spec.ts` (8 tests, all passing). Each asserts three
-things, not one: the **status code** (the contract), the **response body** (what
-the client consumes), and the **side effect** (what the database now holds, via
-a follow-up read). A test that checks only the status code passes against an
-endpoint that returns `201` and stores nothing.
+**Positive 2: boundary values.** `quantity: 0` (valid for a pre-order or an
+out-of-stock line), `price: 0.01`, and an `item_name` at the 120 character
+limit. Expect **201** with the values stored as sent: `quantity` is 0 rather
+than rejected as empty, `price` has not drifted, and the name is not truncated.
+Boundaries are where validation code is usually thinnest.
 
-### Positive
+**Negative 1: missing or invalid token.** No `Authorization` header, then a
+tampered one. Expect **401** for both, nothing created, and no detail about the
+tenant or schema in the response. This is the first negative test I would write
+on a write endpoint, since getting it wrong lets anyone write into any
+merchant's inventory.
 
-**P1 — Valid payload, Store Admin token**
+**Negative 2: invalid field values.** One violation per case: `item_name`
+missing or blank, `sku` missing or with illegal characters, `quantity` of -5 or
+2.5, `price` of -25.00 or the string `"25.00"` or 25.005, and a `category_id`
+that does not exist. Expect **422** (400 would be fine too, as long as it is
+documented and consistent) with the field named, for example
+`{ "field": "price", "issue": "MUST_BE_GTE_0" }`, and nothing saved. The test
+checks the field and reason, not just the status, because an "expect 422"
+also passes when the API blames the wrong field. Negative prices and quantities
+are worth extra attention on a POS, since they affect stock valuation.
 
-- *Input:* the exact payload above, with a valid `Bearer` token for a
-  `STORE_ADMIN` of the tenant, and `category_id: 3` existing for that tenant.
-- *Expected status:* **201 Created**
-- *Expected result:* body echoes `item_name`, `sku`, `quantity: 50`,
-  `price: 25.00`, `category_id: 3`; adds a server-generated `id` (UUID),
-  `created_at`, and `category_name: "Electronics"`; `tenant_id` equals the
-  caller's tenant; a `Location` header points at the new resource. A subsequent
-  `GET /api/v1/inventory/items/{id}` returns **200** with the same values —
-  proving persistence, not just a response. Response within the 2 s SLA.
+**Negative 3: duplicate SKU.** The same SKU posted twice. Expect **409** naming
+the SKU, and a follow-up list query returning exactly one record. SKU
+uniqueness should be per merchant, not global, since two stores may both
+sell MS-001.
 
-**P2 — Boundary values accepted**
+Three more that I would not leave out on a multi-tenant write endpoint, and
+which are in the repository: a Cashier token gets **403** and not 401, malformed
+JSON gets **400** and not a 500, and reading another merchant's item gets
+**404**, since a 403 would confirm the record exists.
 
-- *Input:* `quantity: 0` (legitimate: pre-order or out-of-stock line),
-  `price: 0.01` (smallest chargeable amount), `item_name` at exactly the
-  120-character limit.
-- *Expected status:* **201 Created**
-- *Expected result:* values stored exactly as sent — `quantity` is `0`, not
-  coerced to `null` or rejected as falsy (a very common defect), `price` is
-  `0.01` with no floating-point drift, and the 120-character name is not
-  silently truncated. Boundaries are where validation code is thinnest, which is
-  why this is a positive test rather than an afterthought.
+Further along I would add rate limiting, oversized payloads, two clients
+creating the same SKU at once, and a contract test against the OpenAPI spec so a
+renamed field fails CI.
 
-### Negative
+## 2. Postman
 
-**N1 — Missing or invalid bearer token**
+The collection is in `postman/` and runs under Newman.
 
-- *Input:* the valid payload with (a) no `Authorization` header, then (b) a
-  tampered/expired token.
-- *Expected status:* **401 Unauthorized** in both cases.
-- *Expected result:* error code `UNAUTHENTICATED` / `TOKEN_INVALID`; **no item
-  is created**; the response leaks nothing about the tenant or the schema. This
-  is the highest-priority negative test on a write endpoint: an authentication
-  bypass here would let any caller write into any merchant's inventory.
+### Getting a token before the request runs
 
-**N2 — Invalid field values (validation)**
-
-- *Input:* a table of one violation per row — `item_name` missing; `item_name`
-  blank/whitespace; `sku` missing; `sku` containing illegal characters;
-  `quantity: -5`; `quantity: 2.5`; `price: -25.00`; `price` as the string
-  `"25.00"`; `price: 25.005` (3 decimals); `category_id: 999999` (does not
-  exist for this tenant).
-- *Expected status:* **422 Unprocessable Entity** (400 is also defensible; what
-  matters is that it is documented and consistent).
-- *Expected result:* code `VALIDATION_ERROR` with **field-level detail** —
-  `{ "field": "price", "issue": "MUST_BE_GTE_0" }` — so the client can highlight
-  the offending input; nothing is persisted. The test asserts the specific field
-  *and* reason, because a generic "expect 422" passes even when the API blames
-  the wrong field, which is exactly how unhelpful error messages reach
-  production. Negative `price` and negative `quantity` deserve particular
-  attention on a POS: they corrupt stock valuation and can enable a refund
-  exploit.
-
-**N3 — Duplicate SKU**
-
-- *Input:* the same `sku` posted twice within the same tenant.
-- *Expected status:* **409 Conflict**
-- *Expected result:* code `DUPLICATE_SKU`, message naming the SKU, and — the
-  assertion that matters — a follow-up list query returns **exactly one** record,
-  proving no phantom second row was written. SKU uniqueness must be scoped per
-  tenant, not globally: two different merchants may both legitimately sell
-  `MS-001`, and a global unique constraint would be a serious multi-tenant
-  design bug.
-
-### Additional scenarios I would not ship without
-
-The brief asks for three negatives; these three are why I would still block a
-release. On a multi-tenant write endpoint, authorisation and tenant scoping are
-not extra credit — they are the risk.
-
-| # | Scenario | Status | Expected result |
-|---|---|---|---|
-| N4 | Cashier token (authenticated, not authorised) | **403 Forbidden** | Code `FORBIDDEN`; **403, not 401** — confusing the two breaks client retry logic and masks genuine RBAC bugs |
-| N5 | Malformed JSON body (`{"item_name": "Broken",`) | **400 Bad Request** | Code `MALFORMED_JSON`, **never a 500** — an unhandled parser exception is both a stability and an information-disclosure issue |
-| N6 | Cross-tenant read of an item created by another merchant | **404 Not Found** | 404 rather than 403: a 403 confirms the record exists and leaks another merchant's data volume |
-
-Also on the plan, beyond a code assessment's scope: rate limiting (429),
-oversized payloads (413), unsupported media type (415), concurrent
-same-SKU creation (a race the unique constraint must win), idempotency of
-retries, and a contract test against the OpenAPI spec so a silent field rename
-fails CI.
-
-## 2.2 Postman automation
-
-The full collection is in `postman/` and runs headless under Newman —
-**9 requests, 38 assertions, 0 failures**, verified.
-
-### Dynamic token generation (authentication before the request runs)
-
-The token is obtained by a **collection-level pre-request script**, so it runs
-before *every* request and no request ever carries a hand-pasted token. It also
-**caches** the token and refreshes only when it is missing or within 30 seconds
-of expiry — so a 40-request run performs one login, not forty.
+A pre-request script on the collection, so it runs before every request and no
+request carries a pasted token. It only fetches a new one when the current one
+is missing or nearly expired, so a run of 40 requests logs in once.
 
 ```js
-/**
- * Collection-level pre-request script: dynamic token generation.
- */
 const SKEW_MS = 30 * 1000;
 const token = pm.environment.get('access_token');
 const expiresAt = Number(pm.environment.get('access_token_expires_at') || 0);
@@ -542,8 +347,7 @@ if (stillValid) {
             })
         }
     }, function (err, res) {
-        // Fail loudly: a silent auth failure would surface as a confusing wall
-        // of 401s on the real assertions instead of one clear error.
+        // Fail here rather than letting every later request return 401.
         if (err) { throw new Error('Token request failed: ' + err); }
         if (res.code !== 200) { throw new Error('Login failed: ' + res.code + ' ' + res.text()); }
 
@@ -551,49 +355,29 @@ if (stillValid) {
         pm.environment.set('access_token', body.access_token);
         pm.environment.set('access_token_expires_at', Date.now() + body.expires_in * 1000);
         pm.environment.set('tenant_id', body.user.tenant_id);
-        console.log('[auth] new token cached for ' + body.expires_in + 's');
     });
 }
 ```
 
-Supporting decisions:
+Around that: bearer auth is set once on the collection to `{{access_token}}` and
+inherited, with the 401 test overriding it to No Auth for that request only.
+Credentials are environment variables, the password as a secret type so it is
+masked and left out of exports, and injected from the secret store in CI.
+`base_url` is a variable too, so the same collection runs against local or
+staging. A short pre-request script generates a unique SKU per run so the 409
+case is not hit by accident. The requests are ordered create, read back,
+duplicate, negatives, delete, so a run cleans up after itself.
 
-- **Collection-level Bearer auth** set once to `{{access_token}}`; individual
-  requests inherit it. The 401 test overrides it with `No Auth` for that request
-  only — the negative case is expressed as configuration, not as a copy of the
-  request with the header deleted.
-- **Credentials live in the environment, never in the collection.** The password
-  is a `secret`-type variable so it is masked in the UI and excluded from
-  exports; in CI it is injected from the secret store. `base_url` is an
-  environment variable too, so the same collection runs against local, staging
-  and pre-prod.
-- **Unique data per run.** A request-level pre-request script generates
-  `request_sku = 'MS-' + Date.now().toString(36)`, so the collection is
-  re-runnable without tripping the 409 path by accident.
-- **Self-contained ordering.** Create → read back → duplicate conflict →
-  validation/auth negatives → delete. The teardown request removes what the run
-  created, so state does not accumulate.
-- **In CI:** `newman run ... --reporters cli,junit --reporter-junit-export
-  reports/newman-junit.xml` publishes results into the pipeline's test report
-  (see `.github/workflows/pr-checks.yml`). For a larger suite I would keep
-  Postman as the collaborative/exploratory surface and treat the Playwright API
-  project as the authoritative gate — one contract, two consumers, no drift.
-
-### Tests-tab assertions for a successful 201 and the returned `sku`
+### Tests tab for the 201 response
 
 ```js
-/**
- * Assertions for a successful 201 Created, and verification of the
- * `sku` returned in the response body.
- */
 const expectedSku = pm.collectionVariables.get('request_sku');
 
 pm.test('Status code is 201 Created', function () {
     pm.response.to.have.status(201);
 });
 
-// Parse once, AFTER the status check, so a 4xx/5xx body cannot throw an
-// unhelpful JSON parse error and mask the real failure.
+// Parsed after the status check, so a 500 does not show up as a JSON error.
 const body = pm.response.json();
 
 pm.test('Response body returns the same SKU that was sent', function () {
@@ -601,31 +385,28 @@ pm.test('Response body returns the same SKU that was sent', function () {
     pm.expect(body.sku).to.eql(expectedSku);
 });
 
-pm.test('Response echoes the submitted item exactly', function () {
+pm.test('Response echoes the submitted item', function () {
     pm.expect(body.item_name).to.eql('Wireless Mouse');
     pm.expect(body.quantity).to.eql(50);
     pm.expect(body.price).to.eql(25);
     pm.expect(body.category_id).to.eql(3);
 });
 
-pm.test('Server assigned an id and a creation timestamp', function () {
+pm.test('Server assigned an id and a timestamp', function () {
     pm.expect(body.id).to.be.a('string').and.to.have.lengthOf(36);
     pm.expect(Date.parse(body.created_at)).to.not.be.NaN;
 });
 
-pm.test('Item is scoped to the authenticated tenant', function () {
-    // Multi-tenant platform: the row must belong to the caller's store.
+pm.test('Item belongs to the authenticated tenant', function () {
     pm.expect(body.tenant_id).to.eql(pm.environment.get('tenant_id'));
 });
 
-pm.test('Location header points at the created resource', function () {
+pm.test('Location header points at the new resource', function () {
     pm.expect(pm.response.headers.get('Location'))
       .to.include('/api/v1/inventory/items/' + body.id);
 });
 
-pm.test('Response matches the documented schema', function () {
-    // Schema validation catches contract drift (a renamed or dropped field)
-    // that value-by-value assertions would miss.
+pm.test('Response matches the schema', function () {
     pm.response.to.have.jsonSchema({
         type: 'object',
         required: ['id', 'item_name', 'sku', 'quantity', 'price',
@@ -644,35 +425,22 @@ pm.test('Response matches the documented schema', function () {
     });
 });
 
-pm.test('Responds within the 2s API SLA', function () {
-    pm.expect(pm.response.responseTime).to.be.below(2000);
-});
-
-// Hand the id to the chained requests (duplicate-SKU check, then cleanup).
 pm.collectionVariables.set('created_item_id', body.id);
 ```
 
-Two details worth calling out. The `sku` is asserted against the variable that
-was **sent**, not against a hardcoded `"MS-001"` — a hardcoded literal would
-still pass if the API echoed a stale or default SKU. And `pm.response.json()` is
-called after the status assertion so that a `500` produces "expected 201, got
-500" rather than a JSON parse error that hides it.
+The SKU is compared against the variable that was sent, not a hardcoded
+"MS-001", which would still pass if the API returned a default or a stale value.
+The schema check is there to catch a renamed or dropped field, which the
+value-by-value assertions would miss.
 
----
+# Part 3: CI/CD and database validation
 
-# Part 3: CI/CD & Database Validation
+## 1. Database testing
 
-## 3.1 Database testing
-
-Full script with commentary: `sql/01_verify_item_in_electronics.sql`.
-
-The brief names two tables — `products` and `categories` — and the request
-payload supplies the column names. The query below uses **only those**. I have
-not built a schema around them: the columns that commonly exist on a platform
-like this one, and the one-line change each would require, are listed at the end
-of this section as things to confirm rather than assumed as fact.
-
-**The query (PostgreSQL):**
+Full script: `sql/01_verify_item_in_electronics.sql`. The brief names `products`
+and `categories`, and the payload gives the column names, so the query uses only
+those. Columns that often exist on a platform like this are listed after it as
+things to confirm, not as assumptions.
 
 ```sql
 SELECT
@@ -690,25 +458,17 @@ WHERE p.sku  = :sku
   AND c.name = 'Electronics';
 ```
 
-Three decisions in that query:
+An inner join, because if the category reference does not resolve the row should
+not come back. The filter is on `c.name` and not `p.category_id = 3`: the API
+was given the id 3, so checking the id only proves the value we sent came back.
+Joining and checking the name proves it resolves to Electronics, which is the
+question being asked. `:sku` is bound, not concatenated.
 
-1. **`INNER JOIN`**, because the assertion is "this product *is* in
-   Electronics". If the category reference does not resolve, the row must not
-   come back.
-2. **The filter is on `c.name`, not on `p.category_id = 3`.** The API was *given*
-   `category_id: 3`, so asserting `category_id = 3` proves only that the value we
-   sent came back to us. Joining to `categories` and checking the **name** proves
-   the id actually resolves to Electronics in the categories table — which is
-   what "correctly assigned" means. This is the difference between verifying the
-   write and re-reading our own input.
-3. **Parameters are bound** (`:sku`), never concatenated — injection-safe in test
-   tooling, and the query plan is cached.
-
-**The version the automated test actually runs.** The query above returns "no
-rows" for three different failures — the item was never created, it was created
-against the wrong category, or its `category_id` resolves to nothing — and "no
-rows" is a poor failure message. This version always returns exactly **one row
-of booleans**, so the report names the expectation that broke:
+In the test I run a second version of this. The query above returns no rows for
+three different reasons: never created, created against the wrong category, or a
+`category_id` that resolves to nothing. "No rows" is not a useful failure
+message, so the test version returns one row of booleans and names the one that
+broke:
 
 ```sql
 WITH expected AS (
@@ -717,9 +477,8 @@ WITH expected AS (
            CAST(25.00 AS NUMERIC(12,2)) AS price, 3 AS category_id
 ),
 actual AS (
-    -- LEFT JOIN here (unlike above) so a product whose category_id points at
-    -- nothing still comes back, with category_name = NULL. That separates
-    -- "orphaned reference" from "never inserted".
+    -- Left join, so a product whose category_id points at nothing still comes
+    -- back with category_name NULL.
     SELECT p.id, p.item_name, p.sku, p.quantity, p.price, p.category_id,
            c.name AS category_name
     FROM products p
@@ -731,238 +490,155 @@ SELECT
     a.id IS NOT NULL                  AS product_exists,
     a.category_name IS NOT NULL       AS category_reference_resolves,
     a.category_name = e.category_name AS assigned_to_electronics,
-    a.category_id   = e.category_id   AS category_id_as_submitted,
     a.item_name     = e.item_name     AS item_name_matches,
     a.quantity      = e.quantity      AS quantity_matches,
     a.price         = e.price         AS price_matches_exactly,
     a.id, a.item_name, a.quantity, a.price, a.category_id, a.category_name
 FROM expected e
-LEFT JOIN actual a ON TRUE;   -- expectations always present, so a missing
-                              -- product yields false, not an empty result set
+LEFT JOIN actual a ON TRUE;
 ```
 
-**Validated, not just written.** I ran this logic against four fixtures (SQLite
-harness in `sql/validate_logic.sh`, since the only dialect differences here are
-casting and how booleans render):
+I checked this against four rows in SQLite (`sql/validate_logic.sh`): a correct
+one, one in Groceries, one with a `category_id` of 77 that matches no category,
+and a SKU that was never inserted. The wrong-category row comes back with
+`product_exists` true and `assigned_to_electronics` false, and the orphaned one
+with `category_reference_resolves` false, so the two are distinguishable. With an
+inner join both look the same as "never created".
 
-| Fixture | `exactly_one_row` | `product_exists` | `category_reference_resolves` | `assigned_to_electronics` |
-|---|---|---|---|---|
-| Correct row | true | true | true | true |
-| Wrong category (Groceries) | true | true | true | **false** |
-| `category_id` resolves to nothing | true | true | **false** | NULL |
-| Never created | **false** | false | false | NULL |
+A third query in the file lists products whose `category_id` matches no category
+at all. It should return nothing, and it runs nightly instead of per test.
 
-Rows two and three are the point: both are failures, but the output says *which*
-— a wrong category assignment versus a broken reference. An `INNER JOIN`-only
-check reports both as "nothing found", indistinguishable from "the item was
-never created".
+Three changes to make once I know the real schema:
 
-**A third query in the same file** sweeps for inventory rows whose `category_id`
-resolves to nothing at all (expected: zero rows). It runs nightly rather than
-per test, and it catches the class of corruption an API-level suite cannot see —
-because the API happily returns the id it was handed.
+- If there is a tenant column, add it to the join as well as the where clause:
+  `ON c.id = p.category_id AND c.tenant_id = p.tenant_id`. If categories are
+  per-merchant and the join is on `category_id` alone it will attach another
+  merchant's row, which a single-tenant test dataset never shows. It also allows
+  the check that the same SKU returns nothing for any other tenant.
+- If there are soft deletes, add `AND p.deleted_at IS NULL`, otherwise a row the
+  API deleted still counts as found.
+- If `price` is a float rather than `NUMERIC`, compare with a tolerance
+  (`ABS(p.price - 25.00) < 0.005`), since 25.00 can be stored as 24.999999999. I
+  would also raise storing money as a float separately.
 
-### Extensions to confirm against the real schema
+In practice the database check runs after the API assertions and only looks at
+data the test created, over a read-only connection to a replica so the suite
+never holds locks on the primary. I would not have tests write to the database
+directly: that skips the business logic and turns into a second version of it.
 
-The queries use only documented columns. Three things are common on a platform
-like this, each needs a one-line change, and each is a real defect if it is
-present and ignored — so these are the first questions I would ask the backend
-team.
+## 2. CI/CD integration
 
-| If the schema has | Change | Why it matters |
-|---|---|---|
-| A tenant column (`tenant_id` / `store_id`) | `ON c.id = p.category_id AND c.tenant_id = p.tenant_id`, plus `AND p.tenant_id = :tenant_id` | The platform is multi-tenant, so this is the first thing I would check. The **join** condition matters as much as the filter: if categories are tenant-scoped and the join is on `category_id` alone, it will attach another merchant's category row — a bug a single-tenant test dataset never reveals. And a verification query that reads a shared table untenanted can pass on another merchant's data. It also enables the isolation check worth having on any multi-tenant write path: the same SKU must return zero rows for any other tenant. |
-| Soft deletes (`deleted_at` / `is_deleted`) | `AND p.deleted_at IS NULL` | Without it, a "found" row may be one the API already deleted; with it, a missing row is correctly reported as absent rather than as never created. |
-| `price` stored as `FLOAT`/`DOUBLE` | `ABS(p.price - 25.00) < 0.005` instead of `=` | An exact comparison is only safe against `NUMERIC`/`DECIMAL`. On a float column, `25.00` can be stored as `24.999999999`, and the assertion then fails intermittently on a *correct* value. I would also raise storing money as `NUMERIC(12,2)` as a defect in its own right. |
-
-**How this fits into the test, in practice.** The database assertion runs *after*
-the API assertion and is scoped to data the test itself created. Rules I hold
-to: a **read-only** connection against a **read replica** — a test suite should
-never hold locks on the primary; credentials from the secret store; and queries
-that verify *what the API claims to have done* rather than replacing it. Tests
-that write directly to the database bypass business logic and rot into a second,
-contradictory implementation of it.
-
-
-## 3.2 CI/CD integration
-
-Three workflows in `.github/workflows/`, all valid and committed:
-`pr-checks.yml`, `post-deploy-e2e.yml`, `nightly.yml`. GitHub Actions here; the
-same structure maps directly onto GitLab CI stages or a Jenkins declarative
-pipeline.
-
-**The pipeline:**
+Three workflows in `.github/workflows/`: `pr-checks.yml`, `post-deploy-e2e.yml`
+and `nightly.yml`. GitHub Actions here, but the same shape maps onto GitLab CI
+stages or a Jenkins pipeline.
 
 ```
  commit / PR ─┬─ typecheck (30s)
-              ├─ API tests (2m) ─────┐
-              ├─ Postman/Newman (1m) ├─ all green ⇒ mergeable
-              └─ UI smoke (4m) ──────┘
-                       │
-                merge to main
-                       │
-                 build + deploy to staging
-                       │
-              ┌────────┴─────────┐
-        UI smoke gate (3m)   DB integrity checks
-                │
-        full UI regression, 4 shards (~6m)
-                │
-         merged HTML report + Slack on failure
-                       │
-          nightly: cross-browser · flake hunt (5×) · audit
+              ├─ API tests (2m)
+              ├─ Postman/Newman (1m)
+              └─ UI smoke (4m)          all green -> mergeable
+                       |
+                merge to main, deploy to staging
+                       |
+              UI smoke gate (3m)  +  DB integrity checks
+                       |
+              full UI regression, 4 shards (~6m)
+                       |
+              merged report, Slack message on failure
+
+ nightly: cross-browser, flake hunt (5x), dependency audit
 ```
 
-**1. Containerised, reproducible runs.** Tests execute in the official
-Playwright container (or with `npx playwright install --with-deps`), so browser
-versions are pinned to the Playwright version in `package-lock.json`. "It passed
-on my machine" stops being a category of failure.
+Tests run in the Playwright container, or with `npx playwright install
+--with-deps`, so browser versions come from `package-lock.json` and not from
+whatever happens to be on the machine.
 
-**2. Configuration and secrets.** No credentials in the repo. `BASE_URL` and
-tenant come from environment variables; passwords and the read-only database URL
-come from GitHub Environment secrets, scoped per environment so a fork's PR
-cannot read staging credentials. The suite is environment-agnostic by
-construction — the same code runs locally against the bundled mock app and
-against staging.
+No credentials in the repository. URLs and the tenant come from environment
+variables; passwords and the read-only database URL come from GitHub Environment
+secrets, scoped per environment so a fork's PR cannot read staging credentials.
 
-**3. Caching, deliberately keyed.** `actions/setup-node` caches npm; browser
-binaries (~120 MB) are cached under a key derived from the resolved Playwright
-version, so the cache invalidates automatically on an upgrade instead of serving
-a stale browser. Worth about 40 seconds per job.
+npm is cached by `setup-node`, and the browser binaries are cached under a key
+built from the resolved Playwright version, so an upgrade invalidates the cache
+instead of serving an old browser. It saves about 40 seconds a job.
 
-**4. Parallelism and sharding.** Playwright runs workers in parallel inside a
-job; `--shard=i/4` splits the regression suite across four runners, and
-`playwright merge-reports` combines the blob reports into **one** HTML report.
-Reviewers should not have to open four tabs. Wall-clock time is what decides
-whether a suite gets run or quietly skipped — 24 minutes becomes about 6.
+The regression suite is split with `--shard=i/4` and the blob reports are
+combined with `playwright merge-reports`, so there is one HTML report rather
+than four. That takes it from around 24 minutes to about 6.
 
-**5. Reporting and artifacts.** JUnit XML feeds the platform's native test view;
-the HTML report, screenshots, videos and traces are uploaded on failure
-(`if: always()`) with retention tuned by value — 3 days for shard blobs, 30 days
-for the merged regression report. Every failing CI run therefore ships with a
-replayable trace, so triage does not start with "can you reproduce it?".
+JUnit XML goes to the platform's test view, and the HTML report, screenshots,
+video and traces are uploaded on failure with retention set by usefulness: 3
+days for shard blobs, 30 for the merged report. Because the trace is attached, I
+can usually work out a failure without reproducing it locally.
 
-**6. Quality gates.** Branch protection requires typecheck, API tests, Newman
-and UI smoke to pass before merge. `forbidOnly: true` in CI fails the build if a
-`test.only` was left in a spec — otherwise CI silently runs one test and reports
-green. `fail-fast: false` across shards so one shard's failure does not hide the
-others' results.
+Branch protection requires typecheck, API tests, Newman and UI smoke before a
+merge. `forbidOnly` is on in CI, so a `test.only` left in a spec fails the build
+instead of quietly running one test and reporting green. Shards use
+`fail-fast: false` so one failing shard does not hide the others.
 
-**7. Test data.** Every test creates and cleans up its own data through fixtures;
-identifiers are unique by construction, so parallel jobs and repeated runs never
-collide. No shared golden dataset that drifts and no ordering dependency between
-tests.
+Test data is created and removed by each test through fixtures, with unique
+identifiers, so parallel jobs and repeated runs do not collide. There is no
+shared dataset to drift.
 
-**8. Feedback loop.** Failures post to the squad's Slack channel with a direct
-link to the run and the merged report. The nightly flake hunt
-(`--repeat-each=5 --retries=0`) keeps `retries: 1` honest by surfacing
-non-determinism as a tracked defect rather than letting a retry hide it.
+Failures post to the squad channel with a link to the run. The nightly repeat
+run is what keeps `retries: 1` honest, since it surfaces the flaky tests a retry
+would otherwise hide.
 
-**Ownership.** The suite lives in the repository it tests, is reviewed like
-application code, and developers are expected to add `data-testid` hooks as part
-of a component's definition of done. A QA framework maintained in a separate
-repo by one person is a framework that gets bypassed.
+The suite lives in the same repository as the application and is reviewed the
+same way. A framework kept in a separate repo by one person tends to get worked
+around.
 
-## 3.3 Execution strategy — what runs where, and why
+## 3. Execution strategy
 
-The governing principle: **cost of a test should scale inversely with how often
-it runs.** API tests are cheap, fast and deterministic, so they run constantly;
-UI tests are expensive, slower and more fragile, so they run in tiers with the
-cheapest, highest-value slice first.
+The rule I follow is that the cheaper and more reliable a test is, the more
+often it should run.
 
-| Stage | Trigger | What runs | Target time | Blocking? |
+| Stage | Trigger | What runs | Time | Blocking |
 |---|---|---|---|---|
-| 1. Static analysis | Every push | Typecheck, lint | < 1 min | Yes |
-| 2. API tests | Every push / PR | **Full API suite** (`--project=api`) + Newman collection | 2–3 min | Yes |
-| 3. UI smoke | Every PR | `@smoke` only — login, create product, tenant badge | 3–5 min | Yes |
-| 4. Post-deploy smoke gate | After deploy to staging | `@smoke` against the deployed env | 3 min | Yes — gates the regression run |
-| 5. UI regression | After the smoke gate passes | `@regression`, sharded 4× | ~6 min | Yes for release promotion |
-| 6. DB integrity | After deploy | Referential integrity + tenant isolation sweeps | 1 min | Yes |
-| 7. Nightly | Schedule (02:00 weekdays) | Cross-browser (WebKit for iPad terminals), flake hunt 5×, dependency audit | 30–45 min | No — reports |
-| 8. Pre-release | Release branch / tag | Everything, plus performance and security scans | 60 min | Yes |
+| Static analysis | Every push | Typecheck, lint | < 1 min | Yes |
+| API tests | Every push or PR | Full API suite and the Postman collection | 2-3 min | Yes |
+| UI smoke | Every PR | `@smoke` only | 3-5 min | Yes |
+| Post-deploy smoke | Deploy to staging | `@smoke` against the deployed app | 3 min | Yes |
+| UI regression | After the smoke gate | `@regression`, 4 shards | ~6 min | Yes, for release |
+| DB integrity | After deploy | Orphaned references, tenant isolation | 1 min | Yes |
+| Nightly | 02:00 on weekdays | Cross-browser, repeat run, npm audit | 30-45 min | No |
+| Pre-release | Release branch | Everything, plus performance and security scans | 60 min | Yes |
 
-**Why the full API suite on every commit, but only smoke UI.** API tests are
-seconds each, have no rendering layer to be fragile about, and cover the
-business rules where the real risk lives on this platform — validation, RBAC,
-tenant scoping, duplicate SKUs. They are the highest-value-per-second tests we
-have, so there is no reason to sample them. UI tests are an order of magnitude
-slower and inherently more fragile; running 200 of them on every push buys
-little over the ~8 that would catch a genuinely broken build, and it trains the
-team to ignore CI. So: **all** the API tests, and the UI tests that would block a
-release.
+All the API tests run on every commit because they take seconds, have no
+rendering to be fragile about, and cover the rules where the risk is on this
+platform: validation, permissions, tenant scoping, duplicate SKUs. There is no
+reason to sample them.
 
-**Why UI regression runs only after deployment.** A full UI regression is
-meaningful against a deployed, integrated environment — real network, real
-service dependencies, real data volumes. Running it against an ad-hoc PR
-environment costs more and tells us less. And it runs *behind* the smoke gate:
-if login is broken there is no value in spending 20 minutes discovering that in
-200 other tests. Fail in 3 minutes and roll back.
+Only the smoke UI tests run per PR. UI tests are an order of magnitude slower
+and more fragile, and running 200 of them on every push adds little over the
+eight or so that would catch a genuinely broken build. It also teaches people to
+ignore CI.
 
-**Why cross-browser and flake detection are nightly.** Both are valuable and
-neither is worth paying for on every commit. WebKit coverage matters here —
-merchants run POS terminals on iPads — but a WebKit-specific regression is rare
-enough that catching it within 24 hours is the right trade. Paying for it on
-every push is how a team ends up disabling CI.
+The full UI regression runs after deployment, where there is a real network and
+real dependencies, and behind the smoke gate. If sign-in is broken there is no
+point spending 20 minutes finding that out in 200 other tests.
 
-**The developer's experience of this**, which is the actual point: a broken
-validation rule comes back in about 2 minutes. A broken login flow, about 5. A
-subtle rendering regression in a rarely used module, within the day. Fast
-feedback where it is cheap; thoroughness where it is warranted.
+Cross-browser and the repeat run are nightly. WebKit matters here because
+merchants use iPads, but a WebKit-only regression is rare enough that finding it
+within a day is a reasonable trade for not paying for it on every push.
 
----
+For a developer that means a broken validation rule comes back in about two
+minutes, a broken sign-in in about five, and a rendering regression in a rarely
+used screen the same day.
 
-# Evidence
+# Notes and assumptions
 
-Everything below was executed in preparing this submission; the commands are in
-the repository README.
-
-| Check | Result |
-|---|---|
-| API suite (`npx playwright test --project=api`) | **8 passed** in 4.7 s |
-| UI suite (`npx playwright test --project=ui-chromium`) | **9 passed** in 13.6 s |
-| Postman collection under Newman | **9 requests, 38 assertions, 0 failures** |
-| TypeScript strict typecheck | Clean |
-| SQL verification logic against 4 fixtures | Discriminates all 4 cases correctly |
-| GitHub Actions workflows | 3 workflows, valid YAML |
-
-**Latency resilience (no hidden sleeps).** Re-ran the smoke suite with the
-application's artificial latency raised from 350 ms to 2000 ms (≈6×), no code
-change: **both tests passed**. Timing-dependent tests fail this.
-
-**Mutation testing (do the assertions actually bite?).** A green suite proves
-nothing unless it can go red for the right reasons. I introduced two defects:
-
-| Injected defect | Expected | Observed |
-|---|---|---|
-| Success-toast wording changed (`"saved successfully"` → `"stored ok"`) | Smoke test fails | **Failed** — `toContainText` mismatch, with screenshot |
-| API returns `201` but persists nothing | Persistence tests fail | **Failed** — both the API contract test (`TC-API-01`) and the UI reload test |
-
-The second mutation is the one I care about most: a toast-only test would have
-stayed green while the product silently lost every item a merchant created.
-
----
-
-# Assumptions
-
-Stated because they shaped the code rather than being left implicit.
-
-1. **No environment was provided**, so the repository includes a mock POS
-   application (`mock-app/`, Node core modules only) implementing the documented
-   endpoint contract, plus login, an async-rendered inventory grid, RBAC,
-   multi-tenancy and transient toasts. It exists to make the framework runnable
-   and to genuinely exercise the stability techniques described in §1.4 — the
-   tests point at `BASE_URL`, so the identical suite runs against staging.
-2. **Validation errors return 422** with a `{ error: { code, message, details } }`
-   envelope. `400` is equally defensible; the tests assert the documented
-   contract, whichever it is.
-3. **The database schema was not provided**, so the SQL in §3.1 uses only the
-   two tables the brief names and the columns the request payload supplies. It
-   assumes nothing beyond that. Columns that commonly exist — a tenant column,
-   soft deletes, a float `price` — are listed there as one-line extensions to
-   confirm with the backend team, not baked into the shipped query.
-4. **In the mock application** (not a claim about the real one) `sku` is unique
-   **per tenant** rather than globally, which is the correct design for a
-   multi-tenant catalogue: two merchants may both legitimately sell `MS-001`.
-   `price` is treated as a 2-decimal value.
-5. **`category_id: 3` resolves to Electronics**, per the assessment payload and
-   the Part 3 requirement.
+1. No environment was provided, so the repository includes a small mock POS app
+   (`mock-app/`, Node standard library only) implementing the endpoint from the
+   brief along with sign-in, an inventory grid that loads asynchronously, roles,
+   tenants and toasts that disappear after four seconds. It exists so the suite
+   can be run, and so the waiting described in Part 1.4 has something real to
+   wait for. Tests read `BASE_URL`, so the same suite points at staging.
+2. Validation errors return 422 with `{ error: { code, message, details } }`. 400
+   would be equally reasonable; the tests check whichever is documented.
+3. The database schema was not given, so the SQL uses only the two tables named
+   in the brief and the columns from the payload. The three likely additions are
+   listed in Part 3.1.
+4. In the mock app SKUs are unique per tenant, not globally, which is what I
+   would expect for a multi-tenant catalogue, and prices are held to two decimal
+   places.
+5. `category_id: 3` is Electronics, from the payload and the Part 3 question.

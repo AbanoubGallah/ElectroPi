@@ -143,8 +143,8 @@ npx playwright test --project=ui-chromium --repeat-each=5 --retries=0
 python3 docs/build-pdf.py && node docs/build-pdf.mjs
 ```
 
-Requires `markdown-it-py` and `Pygments`; the PDF itself is rendered by the
-Playwright Chromium already installed for the tests.
+Requires `markdown-it-py`. The PDF is rendered by the Playwright Chromium
+already installed for the tests.
 
 ## Notes
 
