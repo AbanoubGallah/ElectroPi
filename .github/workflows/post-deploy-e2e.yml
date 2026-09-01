@@ -1,0 +1,195 @@
+# ============================================================================
+# Stages 3-5: what runs after a merge to main and a deploy to staging.
+#
+#   deploy (external)  ->  UI smoke (gate)  ->  full UI regression (sharded)
+#                                           ->  DB integrity checks
+#
+# The smoke gate is deliberately between deploy and regression: if login or
+# "save a product" is broken there is no value in spending 20 minutes
+# discovering it in 200 other tests. Fail in 3 minutes and roll back.
+# ============================================================================
+name: Post-deploy E2E
+
+on:
+  # Triggered by the deployment workflow once staging is live.
+  workflow_run:
+    workflows: ['Deploy to staging']
+    types: [completed]
+  # Manual re-run, e.g. after a hotfix.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, pre-prod]
+        default: staging
+
+concurrency:
+  group: post-deploy-${{ github.ref }}
+  cancel-in-progress: false # never cancel a verification run mid-flight
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  ui-smoke-gate:
+    name: UI smoke gate (staging)
+    # Only verify a deploy that actually succeeded.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run @smoke against the deployed environment
+        run: npx playwright test --project=ui-chromium --grep @smoke
+        env:
+          # Credentials come from the environment's secret store. They are never
+          # committed, and `environment:` scoping means a PR from a fork cannot
+          # read them.
+          BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          API_BASE_URL: ${{ vars.STAGING_API_BASE_URL }}
+          TENANT_ID: ${{ vars.STAGING_TENANT_ID }}
+          STORE_ADMIN_EMAIL: ${{ secrets.STAGING_STORE_ADMIN_EMAIL }}
+          STORE_ADMIN_PASSWORD: ${{ secrets.STAGING_STORE_ADMIN_PASSWORD }}
+          CASHIER_EMAIL: ${{ secrets.STAGING_CASHIER_EMAIL }}
+          CASHIER_PASSWORD: ${{ secrets.STAGING_CASHIER_PASSWORD }}
+          OTHER_TENANT_ADMIN_EMAIL: ${{ secrets.STAGING_OTHER_TENANT_ADMIN_EMAIL }}
+          OTHER_TENANT_ADMIN_PASSWORD: ${{ secrets.STAGING_OTHER_TENANT_ADMIN_PASSWORD }}
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: playwright-report/
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # Full regression, sharded across 4 runners. Wall-clock time is what decides
+  # whether a suite gets run or quietly skipped, so 24 minutes becomes ~6.
+  # --------------------------------------------------------------------------
+  ui-regression:
+    name: UI regression (shard ${{ matrix.shard }}/4)
+    needs: ui-smoke-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment || 'staging' }}
+    strategy:
+      fail-fast: false # one shard failing must not hide results from the others
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run regression shard
+        run: npx playwright test --project=ui-chromium --grep @regression --shard=${{ matrix.shard }}/4
+        env:
+          BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          API_BASE_URL: ${{ vars.STAGING_API_BASE_URL }}
+          TENANT_ID: ${{ vars.STAGING_TENANT_ID }}
+          STORE_ADMIN_EMAIL: ${{ secrets.STAGING_STORE_ADMIN_EMAIL }}
+          STORE_ADMIN_PASSWORD: ${{ secrets.STAGING_STORE_ADMIN_PASSWORD }}
+          CASHIER_EMAIL: ${{ secrets.STAGING_CASHIER_EMAIL }}
+          CASHIER_PASSWORD: ${{ secrets.STAGING_CASHIER_PASSWORD }}
+          OTHER_TENANT_ADMIN_EMAIL: ${{ secrets.STAGING_OTHER_TENANT_ADMIN_EMAIL }}
+          OTHER_TENANT_ADMIN_PASSWORD: ${{ secrets.STAGING_OTHER_TENANT_ADMIN_PASSWORD }}
+          # Blob reports from each shard are merged into one HTML report below.
+          PLAYWRIGHT_BLOB_OUTPUT_DIR: blob-report
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 3
+
+  # --------------------------------------------------------------------------
+  # One HTML report for four shards - reviewers should not open four tabs.
+  # --------------------------------------------------------------------------
+  merge-reports:
+    name: Merge shard reports
+    if: always()
+    needs: ui-regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+      - run: npx playwright merge-reports --reporter=html ./all-blob-reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: regression-html-report
+          path: playwright-report/
+          retention-days: 30
+
+  # --------------------------------------------------------------------------
+  # Database-level integrity checks (Part 3.1). Runs against a read replica:
+  # a test suite should never hold locks on the primary.
+  # --------------------------------------------------------------------------
+  db-integrity:
+    name: DB integrity checks
+    needs: ui-smoke-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Referential integrity sweep (expects zero rows)
+        run: |
+          # QUERY C from sql/01_verify_item_in_electronics.sql: inventory rows
+          # whose category_id resolves to nothing.
+          #
+          # If the real schema turns out to have a tenant column, add
+          # `AND c.tenant_id = p.tenant_id` to the join - see the extensions
+          # section of that file. Same for soft deletes (`p.deleted_at IS NULL`).
+          ORPHANS=$(psql "$DATABASE_URL_READONLY" -tA -c "
+            SELECT COUNT(*) FROM products p
+            LEFT JOIN categories c ON c.id = p.category_id
+            WHERE c.id IS NULL;")
+          echo "Orphaned product->category references: $ORPHANS"
+          if [ "$ORPHANS" -ne 0 ]; then
+            echo "::error::Found $ORPHANS inventory rows with an unresolvable category"
+            exit 1
+          fi
+        env:
+          # Read-only credentials, scoped to the QA schema.
+          DATABASE_URL_READONLY: ${{ secrets.STAGING_DATABASE_URL_READONLY }}
+
+  notify:
+    name: Report to the team
+    if: always() && (needs.ui-smoke-gate.result == 'failure' || needs.ui-regression.result == 'failure')
+    needs: [ui-smoke-gate, ui-regression, db-integrity]
+    runs-on: ubuntu-latest
+    steps:
+      # A failure nobody sees is a failure nobody fixes: post to the squad
+      # channel with a direct link to the merged report.
+      - name: Post to Slack
+        run: |
+          curl -sS -X POST "$SLACK_WEBHOOK" \
+            -H 'content-type: application/json' \
+            -d "$(printf '{"text":"Post-deploy E2E failed on %s - report: %s"}' \
+                  "${{ github.ref_name }}" \
+                  "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")"
+        env:
+          SLACK_WEBHOOK: ${{ secrets.QA_SLACK_WEBHOOK }}

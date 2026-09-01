@@ -1,0 +1,87 @@
+# ============================================================================
+# Stage 6: the nightly pipeline - everything too slow for a PR gate.
+#
+# Kept separate on purpose. Cross-browser runs and flake detection are
+# valuable, but paying for them on every commit is how a team ends up
+# disabling CI. Nightly is where breadth lives; the PR gate stays fast.
+# ============================================================================
+name: Nightly regression
+
+on:
+  schedule:
+    - cron: '0 2 * * 1-5' # 02:00 UTC, weekdays - results waiting at standup
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Cross-browser: the @cross-browser subset on WebKit and Firefox. Merchants
+  # run POS terminals on iPads, so Safari/WebKit is a real platform here.
+  # --------------------------------------------------------------------------
+  cross-browser:
+    name: ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [ui-chromium, ui-webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --project=${{ matrix.project }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.project }}
+          path: playwright-report/
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # Flake detection: run the suite repeatedly with retries OFF. A test that
+  # fails 1 run in 5 is flaky - this finds it before a developer loses an hour
+  # to it, and it is the only reliable way to keep `retries: 1` honest.
+  # --------------------------------------------------------------------------
+  flake-hunt:
+    name: Flake detection (5x, no retries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true # informational: it reports, it does not block
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Repeat the suite to surface non-determinism
+        run: npx playwright test --project=ui-chromium --repeat-each=5 --retries=0
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-report
+          path: playwright-report/
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # Dependency audit - a QA suite is production code and rots the same way.
+  # --------------------------------------------------------------------------
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high

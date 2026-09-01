@@ -1,0 +1,162 @@
+# ============================================================================
+# Stage 1 + 2 of the pipeline: the pull-request quality gate.
+#
+# Runs on every push to a PR, ordered cheapest-first so a developer gets the
+# most likely failure back in ~1 minute instead of ~10:
+#
+#   typecheck (~30s) -> API tests (~2m) -> Postman contract (~1m) -> UI smoke (~4m)
+#
+# Nothing here needs a deployed environment: the app under test is booted
+# inside the job, so this gate can never be blocked by a busy staging box.
+# ============================================================================
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+# A new push supersedes the previous run - never pay for a build nobody awaits.
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Static analysis: seconds, and catches the majority of broken commits.
+  # --------------------------------------------------------------------------
+  static-analysis:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # A renamed page-object method or a bad locator type fails here in 30s
+      # rather than 8 minutes into a browser run.
+      - run: npm run typecheck
+
+  # --------------------------------------------------------------------------
+  # API tests: the primary gate. Fast, deterministic, no browser.
+  # --------------------------------------------------------------------------
+  api-tests:
+    name: API tests
+    runs-on: ubuntu-latest
+    needs: static-analysis
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      # playwright.config.ts boots the app and polls /health, so there is no
+      # `sleep 30` in this pipeline either.
+      - name: Run API suite
+        run: npx playwright test --project=api
+
+      - name: Publish results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-report
+          path: |
+            playwright-report/
+            reports/junit.xml
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Newman: runs the same collection the team uses by hand, so it cannot rot.
+  # --------------------------------------------------------------------------
+  postman-contract:
+    name: Postman collection (Newman)
+    runs-on: ubuntu-latest
+    needs: static-analysis
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm install --no-save newman
+
+      - name: Start the application under test
+        run: |
+          node mock-app/server.js &
+          # Poll readiness instead of sleeping; fail fast if it never comes up.
+          npx wait-on http://127.0.0.1:4173/health --timeout 30000
+
+      - name: Run collection
+        run: |
+          mkdir -p reports
+          npx newman run postman/ElectroPi-POS.postman_collection.json \
+            -e postman/ElectroPi-Local.postman_environment.json \
+            --reporters cli,junit \
+            --reporter-junit-export reports/newman-junit.xml
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newman-report
+          path: reports/newman-junit.xml
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # UI smoke: the few flows whose failure would block a release. Tagged
+  # @smoke, so this stays a handful of tests rather than the whole suite.
+  # --------------------------------------------------------------------------
+  ui-smoke:
+    name: UI smoke
+    runs-on: ubuntu-latest
+    needs: api-tests
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      # Cache the browser binaries (~120MB) keyed on the Playwright version:
+      # a cache hit removes ~40s from every run, and the key changes
+      # automatically when the dependency is bumped.
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: browser-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-browsers-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install browsers
+        run: npx playwright install --with-deps chromium
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+      - name: Install OS deps only
+        run: npx playwright install-deps chromium
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+
+      - name: Run @smoke UI tests
+        run: npx playwright test --project=ui-chromium --grep @smoke
+
+      # Traces are the reason a CI failure does not need a local reproduction:
+      # `npx playwright show-trace <file>` replays the DOM, network and console.
+      - name: Upload report and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-smoke-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
