@@ -1,0 +1,10 @@
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+reports/
+.auth/
+.env
+*.log
+.DS_Store
+docs/ANSWERS.html
