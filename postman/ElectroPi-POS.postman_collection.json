@@ -1,0 +1,592 @@
+{
+  "info": {
+    "name": "Electro Pi POS - Inventory API",
+    "description": "API tests for POST /api/v1/inventory/items.\n\nAuth is handled by the collection-level pre-request script (dynamic token generation with caching) - individual requests never carry a hand-pasted token.\n\nRun headless in CI:\n  newman run postman/ElectroPi-POS.postman_collection.json \\\n    -e postman/ElectroPi-Local.postman_environment.json \\\n    --reporters cli,junit --reporter-junit-export reports/newman-junit.xml\n\nRequests are ordered so the run is self-contained: create -> read back -> duplicate conflict -> validation/auth negatives -> cleanup.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "/**",
+          " * Collection-level pre-request script: dynamic token generation.",
+          " *",
+          " * Runs before EVERY request in the collection, so no request needs its own",
+          " * auth step and no token is ever pasted into a header by hand.",
+          " *",
+          " * It refreshes only when needed (missing or within 30s of expiry), so a",
+          " * 40-request Newman run performs one login, not forty.",
+          " */",
+          "const SKEW_MS = 30 * 1000;",
+          "const token = pm.environment.get('access_token');",
+          "const expiresAt = Number(pm.environment.get('access_token_expires_at') || 0);",
+          "const stillValid = Boolean(token) && Date.now() < expiresAt - SKEW_MS;",
+          "",
+          "if (stillValid) {",
+          "    console.log('[auth] reusing cached token');",
+          "} else {",
+          "    pm.sendRequest({",
+          "        url: pm.environment.get('base_url') + '/api/v1/auth/login',",
+          "        method: 'POST',",
+          "        header: { 'Content-Type': 'application/json' },",
+          "        body: {",
+          "            mode: 'raw',",
+          "            raw: JSON.stringify({",
+          "                email: pm.environment.get('store_admin_email'),",
+          "                password: pm.environment.get('store_admin_password')",
+          "            })",
+          "        }",
+          "    }, function (err, res) {",
+          "        // Fail loudly: a silent auth failure would surface as a confusing",
+          "        // wall of 401s on the real assertions instead of one clear error.",
+          "        if (err) { throw new Error('Token request failed: ' + err); }",
+          "        if (res.code !== 200) { throw new Error('Login failed: ' + res.code + ' ' + res.text()); }",
+          "",
+          "        const body = res.json();",
+          "        pm.environment.set('access_token', body.access_token);",
+          "        pm.environment.set('access_token_expires_at', Date.now() + body.expires_in * 1000);",
+          "        pm.environment.set('tenant_id', body.user.tenant_id);",
+          "        console.log('[auth] new token cached for ' + body.expires_in + 's');",
+          "    });",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Applies to every response in the collection - hygiene checks that would",
+          "// otherwise be copy-pasted into each request's Tests tab.",
+          "pm.test('Response has the expected media type', function () {",
+          "    if (pm.response.code === 204) {",
+          "        // 204 No Content: assert there is genuinely no body, rather than",
+          "        // demanding a Content-Type that should not be there.",
+          "        pm.expect(pm.response.text()).to.be.empty;",
+          "    } else {",
+          "        pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');",
+          "    }",
+          "});",
+          "",
+          "pm.test('No server error (5xx)', function () {",
+          "    pm.expect(pm.response.code).to.be.below(500);",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "request_sku",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "created_item_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Positive",
+      "item": [
+        {
+          "name": "Create inventory item (201 Created)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Unique-by-construction SKU: the collection can be re-run any number of",
+                  "// times without tripping the 409 DUPLICATE_SKU path by accident.",
+                  "const uniqueSku = 'MS-' + Date.now().toString(36).toUpperCase();",
+                  "pm.collectionVariables.set('request_sku', uniqueSku);",
+                  "console.log('[data] using sku ' + uniqueSku);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "/**",
+                  " * Part 2.2 - assertions for a successful 201 Created, and verification of",
+                  " * the `sku` returned in the response body.",
+                  " */",
+                  "const expectedSku = pm.collectionVariables.get('request_sku');",
+                  "",
+                  "pm.test('Status code is 201 Created', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "// Parse once, after the status check, so a 4xx/5xx body cannot throw an",
+                  "// unhelpful JSON parse error and mask the real failure.",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('Response body returns the same SKU that was sent', function () {",
+                  "    pm.expect(body).to.have.property('sku');",
+                  "    pm.expect(body.sku).to.eql(expectedSku);",
+                  "});",
+                  "",
+                  "pm.test('Response echoes the submitted item exactly', function () {",
+                  "    pm.expect(body.item_name).to.eql('Wireless Mouse');",
+                  "    pm.expect(body.quantity).to.eql(50);",
+                  "    pm.expect(body.price).to.eql(25);",
+                  "    pm.expect(body.category_id).to.eql(3);",
+                  "});",
+                  "",
+                  "pm.test('Server assigned an id and a creation timestamp', function () {",
+                  "    pm.expect(body.id).to.be.a('string').and.to.have.lengthOf(36);",
+                  "    pm.expect(Date.parse(body.created_at)).to.not.be.NaN;",
+                  "});",
+                  "",
+                  "pm.test('Item is scoped to the authenticated tenant', function () {",
+                  "    // Multi-tenant platform: the row must belong to the caller's store.",
+                  "    pm.expect(body.tenant_id).to.eql(pm.environment.get('tenant_id'));",
+                  "});",
+                  "",
+                  "pm.test('Location header points at the created resource', function () {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.include('/api/v1/inventory/items/' + body.id);",
+                  "});",
+                  "",
+                  "pm.test('Response matches the documented schema', function () {",
+                  "    // Schema validation catches contract drift (a renamed or dropped field)",
+                  "    // that value-by-value assertions would miss.",
+                  "    pm.response.to.have.jsonSchema({",
+                  "        type: 'object',",
+                  "        required: ['id', 'item_name', 'sku', 'quantity', 'price', 'category_id', 'tenant_id', 'created_at'],",
+                  "        properties: {",
+                  "            id: { type: 'string' },",
+                  "            item_name: { type: 'string' },",
+                  "            sku: { type: 'string' },",
+                  "            quantity: { type: 'integer', minimum: 0 },",
+                  "            price: { type: 'number', minimum: 0 },",
+                  "            category_id: { type: 'integer' },",
+                  "            category_name: { type: ['string', 'null'] },",
+                  "            tenant_id: { type: 'string' },",
+                  "            created_at: { type: 'string' }",
+                  "        }",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Responds within the 2s API SLA', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(2000);",
+                  "});",
+                  "",
+                  "// Hand the id to the chained requests (duplicate-SKU check, then cleanup).",
+                  "pm.collectionVariables.set('created_item_id', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"item_name\": \"Wireless Mouse\",\n    \"sku\": \"{{request_sku}}\",\n    \"quantity\": 50,\n    \"price\": 25.0,\n    \"category_id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Read the item back (200 OK - proves it persisted)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Persisted record matches what was created', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.sku).to.eql(pm.collectionVariables.get('request_sku'));",
+                  "    pm.expect(body.item_name).to.eql('Wireless Mouse');",
+                  "    pm.expect(body.price).to.eql(25);",
+                  "    // Joined category name - the API resolved category_id 3 correctly.",
+                  "    pm.expect(body.category_name).to.eql('Electronics');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items/{{created_item_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items",
+                "{{created_item_id}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Negative",
+      "item": [
+        {
+          "name": "Duplicate SKU (409 Conflict)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 409 Conflict', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "",
+                  "pm.test('Error identifies the duplicate SKU', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.error.code).to.eql('DUPLICATE_SKU');",
+                  "    pm.expect(body.error.message).to.include(pm.collectionVariables.get('request_sku'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"item_name\": \"Wireless Mouse\",\n    \"sku\": \"{{request_sku}}\",\n    \"quantity\": 10,\n    \"price\": 25.0,\n    \"category_id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Missing required field: item_name (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 Unprocessable Entity', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error names the offending field, not just a generic message', function () {",
+                  "    const details = pm.response.json().error.details;",
+                  "    pm.expect(details).to.deep.include({ field: 'item_name', issue: 'REQUIRED' });",
+                  "});",
+                  "",
+                  "pm.test('Nothing was created', function () {",
+                  "    pm.expect(pm.response.json()).to.not.have.property('id');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"sku\": \"MS-NO-NAME\",\n    \"quantity\": 50,\n    \"price\": 25.0,\n    \"category_id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Negative price (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 Unprocessable Entity', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('price is rejected as out of range', function () {",
+                  "    pm.expect(pm.response.json().error.details).to.deep.include({",
+                  "        field: 'price', issue: 'MUST_BE_GTE_0'",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"item_name\": \"Wireless Mouse\",\n    \"sku\": \"MS-NEG-PRICE\",\n    \"quantity\": 50,\n    \"price\": -25.0,\n    \"category_id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "No bearer token (401 Unauthorized)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 Unauthorized', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});",
+                  "",
+                  "pm.test('Error code is UNAUTHENTICATED', function () {",
+                  "    pm.expect(pm.response.json().error.code).to.eql('UNAUTHENTICATED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"item_name\": \"Wireless Mouse\",\n    \"sku\": \"MS-NO-AUTH\",\n    \"quantity\": 50,\n    \"price\": 25.0,\n    \"category_id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Unknown category_id (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 Unprocessable Entity', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('category_id is reported as not found', function () {",
+                  "    pm.expect(pm.response.json().error.details).to.deep.include({",
+                  "        field: 'category_id', issue: 'NOT_FOUND'",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"item_name\": \"Wireless Mouse\",\n    \"sku\": \"MS-BAD-CAT\",\n    \"quantity\": 50,\n    \"price\": 25.0,\n    \"category_id\": 999999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Teardown",
+      "item": [
+        {
+          "name": "Delete the created item (204 No Content)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Leaving test data behind makes the next run's assertions unreliable.",
+                  "pm.test('Status code is 204 No Content', function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inventory/items/{{created_item_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inventory",
+                "items",
+                "{{created_item_id}}"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
