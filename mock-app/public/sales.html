@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>Sales · Electro Pi POS</title><link rel="stylesheet" href="/app.css" /></head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><span class="dot"></span> Electro Pi</div>
+      <nav aria-label="Main">
+        <a href="/dashboard.html" data-testid="nav-dashboard">Dashboard</a>
+        <a href="/inventory.html" data-testid="nav-inventory">Inventory</a>
+        <a href="/sales.html" data-testid="nav-sales" aria-current="page">Sales</a>
+      </nav>
+    </aside>
+    <main>
+      <div class="topbar"><h1>Sales</h1></div>
+      <div class="card"><div class="empty">Sales module placeholder.</div></div>
+    </main>
+  </div>
+  <div class="toasts" data-testid="toast-container"></div>
+  <script type="module">
+    import { requireSession } from '/app.js';
+    requireSession();
+  </script>
+</body>
+</html>

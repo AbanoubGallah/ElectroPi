@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard · Electro Pi POS</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><span class="dot"></span> Electro Pi</div>
+      <nav aria-label="Main">
+        <a href="/dashboard.html" data-testid="nav-dashboard" aria-current="page">Dashboard</a>
+        <a href="/inventory.html" data-testid="nav-inventory">Inventory</a>
+        <a href="/sales.html" data-testid="nav-sales">Sales</a>
+      </nav>
+    </aside>
+    <main>
+      <div class="topbar">
+        <div>
+          <h1>Dashboard</h1>
+          <span class="tenant" data-testid="tenant-badge"></span>
+        </div>
+        <button class="ghost" data-testid="logout">Sign out</button>
+      </div>
+      <div class="card"><div class="empty" data-testid="dashboard-ready">Today's takings will appear here.</div></div>
+    </main>
+  </div>
+  <div class="toasts" data-testid="toast-container"></div>
+
+  <script type="module">
+    import { Session, requireSession } from '/app.js';
+    const user = requireSession();
+    if (user) {
+      document.querySelector('[data-testid="tenant-badge"]').textContent = `${user.name} · ${user.role} · ${user.tenant_id}`;
+    }
+    document.querySelector('[data-testid="logout"]').addEventListener('click', () => {
+      Session.clear();
+      location.assign('/login.html');
+    });
+  </script>
+</body>
+</html>

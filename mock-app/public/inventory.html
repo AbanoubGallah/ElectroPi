@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inventory · Electro Pi POS</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><span class="dot"></span> Electro Pi</div>
+      <nav aria-label="Main">
+        <a href="/dashboard.html" data-testid="nav-dashboard">Dashboard</a>
+        <a href="/inventory.html" data-testid="nav-inventory" aria-current="page">Inventory</a>
+        <a href="/sales.html" data-testid="nav-sales">Sales</a>
+      </nav>
+    </aside>
+
+    <main>
+      <div class="topbar">
+        <div>
+          <h1 data-testid="page-title">Inventory</h1>
+          <span class="tenant" data-testid="tenant-badge"></span>
+        </div>
+        <button class="primary" data-testid="add-product-btn" disabled>Add product</button>
+      </div>
+
+      <div class="card">
+        <!-- Async data render: the spinner is the real signal that the grid is not ready yet. -->
+        <div class="loading" data-testid="inventory-loading">
+          <span class="spinner" aria-hidden="true"></span> Loading inventory…
+        </div>
+
+        <table data-testid="inventory-table" hidden>
+          <thead>
+            <tr><th>Product</th><th>SKU</th><th>Category</th><th>Qty</th><th>Price</th></tr>
+          </thead>
+          <tbody data-testid="inventory-tbody"></tbody>
+        </table>
+        <div class="empty" data-testid="inventory-empty" hidden>No products yet. Add your first product.</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Product modal -->
+  <div class="overlay" data-testid="product-modal" hidden>
+    <form class="modal" data-testid="product-form" novalidate>
+      <header>New product</header>
+      <div class="body">
+        <div class="field">
+          <label for="product-name">Product name</label>
+          <input id="product-name" name="item_name" data-testid="product-name" />
+          <span class="field-error" data-testid="error-item_name" hidden></span>
+        </div>
+        <div class="field">
+          <label for="product-price">Price (USD)</label>
+          <input id="product-price" name="price" inputmode="decimal" data-testid="product-price" />
+          <span class="field-error" data-testid="error-price" hidden></span>
+        </div>
+        <div class="field">
+          <label for="product-sku">SKU <span style="font-weight:400">(auto-generated if blank)</span></label>
+          <input id="product-sku" name="sku" data-testid="product-sku" />
+          <span class="field-error" data-testid="error-sku" hidden></span>
+        </div>
+        <div class="field">
+          <label for="product-quantity">Quantity</label>
+          <input id="product-quantity" name="quantity" inputmode="numeric" value="0" data-testid="product-quantity" />
+          <span class="field-error" data-testid="error-quantity" hidden></span>
+        </div>
+        <div class="field">
+          <label for="product-category">Category</label>
+          <!-- Options arrive from GET /categories: disabled until the fetch resolves. -->
+          <select id="product-category" name="category_id" data-testid="product-category" disabled>
+            <option value="">Loading categories…</option>
+          </select>
+          <span class="field-error" data-testid="error-category_id" hidden></span>
+        </div>
+      </div>
+      <footer>
+        <button class="ghost" type="button" data-testid="product-cancel">Cancel</button>
+        <button class="primary" type="submit" data-testid="product-save">Save</button>
+      </footer>
+    </form>
+  </div>
+
+  <div class="toasts" data-testid="toast-container"></div>
+
+  <script type="module">
+    import { requireSession, api, showToast, money } from '/app.js';
+
+    const user = requireSession();
+    const $ = (id) => document.querySelector(`[data-testid="${id}"]`);
+    const FIELDS = ['item_name', 'price', 'sku', 'quantity', 'category_id'];
+
+    const ISSUE_TEXT = {
+      REQUIRED: 'This field is required.',
+      MUST_BE_NUMBER: 'Enter a valid number.',
+      MUST_BE_INTEGER: 'Enter a whole number.',
+      MUST_BE_GTE_0: 'Value cannot be negative.',
+      MAX_2_DECIMALS: 'Use at most 2 decimal places.',
+      MAX_1000000: 'Price is above the allowed maximum.',
+      MAX_LENGTH_120: 'Keep this under 120 characters.',
+      INVALID_FORMAT: 'Use letters, numbers and dashes only.',
+      NOT_FOUND: 'Select a valid category.',
+    };
+
+    if (user) $('tenant-badge').textContent = `${user.name} · ${user.role} · ${user.tenant_id}`;
+
+    const row = (item) => {
+      const tr = document.createElement('tr');
+      tr.setAttribute('data-testid', 'inventory-row');
+      tr.dataset.sku = item.sku;
+      tr.innerHTML = `
+        <td data-testid="cell-name">${item.item_name}</td>
+        <td data-testid="cell-sku">${item.sku}</td>
+        <td data-testid="cell-category">${item.category_name ?? '—'}</td>
+        <td data-testid="cell-quantity">${item.quantity}</td>
+        <td data-testid="cell-price">${money(item.price)}</td>`;
+      return tr;
+    };
+
+    function paint(rows) {
+      const tbody = $('inventory-tbody');
+      tbody.replaceChildren(...rows.map(row));
+      $('inventory-table').hidden = rows.length === 0;
+      $('inventory-empty').hidden = rows.length > 0;
+    }
+
+    /** Initial load: spinner -> data -> enable the primary action. */
+    async function load() {
+      try {
+        const [inventory, cats] = await Promise.all([api('/inventory/items'), api('/categories')]);
+        paint(inventory.data);
+        const select = $('product-category');
+        select.replaceChildren(
+          Object.assign(document.createElement('option'), { value: '', textContent: 'Select a category' }),
+          ...cats.data.map((c) => Object.assign(document.createElement('option'), { value: String(c.id), textContent: c.name })),
+        );
+        // Pre-select the store default so a name + price entry is savable.
+        // `defaultSelected` (not `.value`) so form.reset() keeps the default.
+        const preferred = [...select.options].find((o) => o.textContent === 'Electronics')
+          ?? [...select.options].find((o) => o.value !== '');
+        if (preferred) preferred.defaultSelected = true;
+        select.disabled = false;
+        $('add-product-btn').disabled = false;
+      } catch (err) {
+        showToast(err.status === 401 ? 'Session expired, please sign in again.' : 'Could not load inventory.', 'error');
+      } finally {
+        $('inventory-loading').hidden = true;
+      }
+    }
+
+    const clearErrors = () => FIELDS.forEach((f) => {
+      const el = $(`error-${f}`);
+      el.hidden = true;
+      el.textContent = '';
+      document.querySelector(`[name="${f}"]`)?.removeAttribute('aria-invalid');
+    });
+
+    function showFieldErrors(details = []) {
+      details.forEach(({ field, issue }) => {
+        const el = $(`error-${field}`);
+        if (!el) return;
+        el.textContent = ISSUE_TEXT[issue] ?? issue;
+        el.hidden = false;
+        document.querySelector(`[name="${field}"]`)?.setAttribute('aria-invalid', 'true');
+      });
+    }
+
+    const openModal = () => { clearErrors(); $('product-form').reset(); $('product-modal').hidden = false; $('product-name').focus(); };
+    const closeModal = () => { $('product-modal').hidden = true; };
+
+    $('add-product-btn').addEventListener('click', openModal);
+    $('product-cancel').addEventListener('click', closeModal);
+
+    /** Autogenerate a SKU so the "name + price + save" flow works as specified. */
+    const autoSku = (name) =>
+      (name.replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase() || 'ITEM') +
+      '-' + Math.random().toString(36).slice(2, 7).toUpperCase();
+
+    $('product-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      clearErrors();
+      const form = event.currentTarget;
+      const save = $('product-save');
+      // Optimistic-UI guard: the button is disabled for the whole in-flight window.
+      save.disabled = true;
+      save.textContent = 'Saving…';
+
+      const rawPrice = form.elements.price.value.trim();
+      const rawQty = form.elements.quantity.value.trim();
+      const payload = {
+        item_name: form.elements.item_name.value.trim(),
+        sku: form.elements.sku.value.trim() || autoSku(form.elements.item_name.value.trim()),
+        quantity: rawQty === '' ? 0 : Number(rawQty),
+        price: rawPrice === '' ? null : Number(rawPrice),
+        category_id: form.elements.category_id.value === '' ? null : Number(form.elements.category_id.value),
+      };
+
+      try {
+        const created = await api('/inventory/items', { method: 'POST', body: payload });
+        $('inventory-tbody').prepend(row(created));
+        $('inventory-table').hidden = false;
+        $('inventory-empty').hidden = true;
+        closeModal();
+        showToast(`Product "${created.item_name}" saved successfully`, 'success');
+      } catch (err) {
+        if (err.status === 422) {
+          showFieldErrors(err.payload?.error?.details);
+          showToast('Please correct the highlighted fields', 'error');
+        } else if (err.status === 409) {
+          showFieldErrors([{ field: 'sku', issue: 'This SKU already exists.' }]);
+          showToast('SKU already exists for this store', 'error');
+        } else if (err.status === 403) {
+          showToast('You do not have permission to add products', 'error');
+        } else {
+          showToast('Could not save product. Please try again.', 'error');
+        }
+      } finally {
+        save.disabled = false;
+        save.textContent = 'Save';
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>
